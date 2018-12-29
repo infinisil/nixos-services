@@ -1,0 +1,158 @@
+* Guidelines for writing NixOS services
+
+** enable option
+
+Always include a short description of what the service does in this options description. Maybe even a link to its homepage. Maybe even use the packages description/homepage automatically with mkEnableOption.
+
+** user/group
+
+*** Making user/group configurable
+
+No user/group option, instead you do this:
+
+#+BEGIN_SRC nix
+  { config, ... }:
+
+  let
+
+    user = config.users.users.foo.name;
+    group = config.users.groups.foo.name;
+
+  in
+
+  {
+
+    config = {
+      systemd.services.foo.serviceConfig = {
+        User = user;
+        Group = group;
+      };
+
+      users = {
+        users.foo.group = config.users.groups.foo.name;
+        groups.foo = {};
+      };
+    };
+
+  }
+#+END_SRC
+
+This way module users can override user/group of the service by doing (TODO: Test this)
+
+#+BEGIN_SRC nix
+  {
+
+    users ={
+      users.foo.name = "paul";
+      groups.foo.name = "users";
+    };
+
+  }
+#+END_SRC
+
+Only if it's very integral to the service that the user/group needs to be configurable, a separate option under `services.foo.{user.group}` shall be created.
+
+*** Should I use hardcoded uid/gid (nixos/modules/misc/ids.nix)?
+
+Other question: Do we need such a static mapping at all?
+
+NixOS keeps a mapping from names to uids/gids in /var/lib/nixos/{u,g}id-map in order to ensure that they stay the same over the lifetime of a system anyways. Assuming you always backup/restore /var/lib/nixos along with the services directories (which are in /var/lib/* too by default), then there shouldn't be any need for a static uid/gid mapping.
+
+(rambling..) What about sharing a directory between different machines? In that case you should declare that you need to share this directory and assign a static gid/uid to the user. But when you started the service already, the uid/gid's will be wrong for all of the files.
+
+So how about this:
+- Every service should start by checking whether the permissions on the data directory are usable, and if not, make it usable, recursively. While if this action takes place, it /might/ take a while to finish, the action won't take place in almost all cases. You'll have to restore a backup from another machine and explicitly import /var/lib/foo without doing the same for /var/lib/nixos.
+
+
+*** Should I set users.users.foo.home?
+
+What's the point of it? Creates the directory and maybe some services need home to point to their state directory. Also it makes sense. But those are all pretty vague reasons. The directory can be created with systemd tmpfiles too.
+
+** dataDir
+
+Use users.users.foo.home for that instead. Only use a separate option when it's an integral part of the module, e.g. with syncthing, git and databases, aka programs that exist to handle data.
+
+
+Of the services that currently have a dataDir option, here's my recommendation on whether they need it
+| Service       | Needs dataDir |
+| ---           | ---           |
+| Syncthing     | Yes           |
+| Minio         | Yes           |
+| gitolite      | Yes           |
+| Postgresql    | Yes           |
+| mysql         | Yes           |
+| amule         | Yes           |
+| boinc         | No            |
+| bepasty       | Yes           |
+| buildkite     | No            |
+| caddy         | Maybe?        |
+| cfssl         | No            |
+| collectd      | No            |
+| elasticsearch | Yes           |
+| emby          | Yes           |
+| errbot        | No            |
+| etcd          | Yes           |
+| foundationdb  | Yes           |
+| grafana       | No            |
+| graphite      | No            |
+| hbase         | Yes           |
+| hydron        | Yes           |
+| i2pd          | No            |
+
+(Not for later: How about unitConfig.RequiresMountsFor = cfg.dataDir;)
+
+** package option
+
+https://github.com/NixOS/nixpkgs/issues/50476
+
+How about providing an option to overlay specific packages:
+
+#+BEGIN_SRC nix
+  {
+
+    # By default: package.foo = self: super: self.foo;
+    package.foo = self: super: self.foo_1;
+
+  }
+#+END_SRC
+
+services should be named exactly according to their packages unless there's a good reason against this.
+
+** Configuration options
+
+Every service may have a number of configuration options: ~config~, ~configFile~, ~extraConfig~
+
+The most flexible, unsafe and option that every service should (probably) have is ~configFile~. It can be set by the user directly, in which case any other auto-generated configuration values shall not be used (this means you should declare those with mkDefault). There's no merging possible with this option. This option is however very useful to inspect the final generated configuration.
+
+Now comes a decision part: Can the config file be generated from a Nix attribute set? This is true for yaml/json and similar config files.
+- Yes: Is it implemented?
+  - Yes: ~config~ should represent the value of this attribute set, with a fully specified type to make merging work. If it makes sense and is absolutely needed, ~extraConfig~ can be used to append literal config to the generated text. This doesn't make sense with e.g. json, but does with yaml. The advantage of not having ~extraConfig~ is that the full configuration is available in Nix, meaning you can access it and infer things from it (e.g. open firewall). You can still do this if you have ~extraConfig~, it will just miss the config specified in there.
+  - No: Try to implement it (TODO: Provide functions for dealing with common configuration files). TODO: What here?
+- No: ~config~ should represent the string of the config file. merging via concatenation only if it makes sense (not the case with xmonad config). ~extraConfig~ option is not needed.
+
+The type of ~extraConfig~ needs to be lines. If it would be ~attrs~, then it should be named ~config~ instead.
+~config~ represents either the string for the full configuration
+
+** extraOptions
+
+Should have type ~listOf str~ in order to be able to escape everything properly with ~lib.escapeShellArgs~. Not ~extraArgs~.
+
+** openFirewall
+
+If it's a common thing to want, add this option, defaulting to false (exception openssh).
+
+** General
+
+Point out that sensitive options like ~password~ will end up storing the password in the nix store, which is insecure.
+
+Make types.string deprecated
+
+Make sure that the manual doesn't need to be rebuilt when all options values get changed.
+
+** Backwards compatibility and migrations
+
+TODO
+
+* But how about a more general `services.<name>.{user,group,dataDir,...}` option?
+
+Problem is: How to have options more specific to the service.
